@@ -4,6 +4,7 @@
     clippy::type_complexity
 )]
 
+use crate::dxil::*;
 use crate::ffi::*;
 use crate::os::{HRESULT, LPCWSTR, LPWSTR, WCHAR};
 use crate::utils::{from_wide, to_wide, HassleError};
@@ -36,14 +37,46 @@ macro_rules! check_hr_wrapped {
     }};
 }
 
-#[derive(Debug)]
+macro_rules! check_comptr_null {
+    ($val:expr, $res:expr) => {{
+        if $val.is_null() {
+            None
+        } else {
+            Some($res)
+        }
+    }};
+}
+
+#[derive(Debug, Clone)]
 pub struct DxcBlob {
-    inner: ComPtr<IDxcBlob>,
+    pub(crate) inner: ComPtr<IDxcBlob>,
 }
 
 impl DxcBlob {
-    fn new(inner: ComPtr<IDxcBlob>) -> Self {
+    pub(crate) fn new(inner: ComPtr<IDxcBlob>) -> Self {
         Self { inner }
+    }
+
+    #[cfg(windows)]
+    pub fn from_slice(slice: &[u8]) -> Result<Self, HassleError> {
+        let mut blob = ComPtr::<IDxcBlob>::new();
+
+        // This weird pointer cast from IDxcBlob to ID3DBlob is safe:
+        // See https://github.com/microsoft/DirectXShaderCompiler/blob/285490211f2cbb44444a23d5f1c329881b96a43b/docs/HLSLChanges.rst
+        // `The HLSL compiler avoids pulling in DirectX headers and defines an
+        // IDxcBlob interface that has the same layout and interface identifier (IID).`
+        let blob_ptr: *mut *mut IDxcBlob = blob.as_mut_ptr::<IDxcBlob>();
+        check_hr_wrapped!(
+            unsafe { winapi::um::d3dcompiler::D3DCreateBlob(slice.len(), blob_ptr as *mut *mut _) },
+            unsafe {
+                let target = std::slice::from_raw_parts_mut(
+                    blob.get_buffer_pointer() as *mut _,
+                    slice.len(),
+                );
+                target.copy_from_slice(slice);
+                Self { inner: blob }
+            }
+        )
     }
 
     pub fn to_vec<T>(&self) -> Vec<T>
@@ -546,6 +579,30 @@ impl Dxc {
             DxcLibrary::new(library)
         )
     }
+
+    pub fn create_container_reflection(&self) -> Result<DxcContainerReflection, HassleError> {
+        let mut reflection: ComPtr<IDxcContainerReflection> = ComPtr::new();
+        check_hr_wrapped!(
+            self.get_dxc_create_instance()?(
+                &CLSID_DxcContainerReflection,
+                &IID_IDxcContainerReflection,
+                reflection.as_mut_ptr(),
+            ),
+            DxcContainerReflection::new(reflection)
+        )
+    }
+
+    pub fn create_validator(&self) -> Result<DxcValidator, HassleError> {
+        let mut validator: ComPtr<IDxcValidator> = ComPtr::new();
+        check_hr_wrapped!(
+            self.get_dxc_create_instance()?(
+                &CLSID_DxcValidator,
+                &IID_IDxcValidator,
+                validator.as_mut_ptr(),
+            ),
+            DxcValidator::new(validator)
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -556,7 +613,7 @@ pub struct DxcValidator {
 pub type DxcValidatorVersion = (u32, u32);
 
 impl DxcValidator {
-    fn new(inner: ComPtr<IDxcValidator>) -> Self {
+    pub(crate) fn new(inner: ComPtr<IDxcValidator>) -> Self {
         Self { inner }
     }
 
@@ -599,47 +656,5 @@ impl DxcValidator {
         } else {
             Err((DxcOperationResult::new(result), result_hr))
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct Dxil {
-    dxil_lib: Library,
-}
-
-impl Dxil {
-    pub fn new() -> Result<Self, HassleError> {
-        #[cfg(not(windows))]
-        {
-            Err(HassleError::WindowsOnly(
-                "DXIL Signing is only supported on windows at the moment".to_string(),
-            ))
-        }
-
-        #[cfg(windows)]
-        {
-            let dxil_lib = Library::new("dxil.dll").map_err(|e| HassleError::LoadLibraryError {
-                filename: "dxil".to_string(),
-                inner: e,
-            })?;
-
-            Ok(Self { dxil_lib })
-        }
-    }
-
-    fn get_dxc_create_instance(&self) -> Result<Symbol<DxcCreateInstanceProc>, HassleError> {
-        Ok(unsafe { self.dxil_lib.get(b"DxcCreateInstance\0")? })
-    }
-
-    pub fn create_validator(&self) -> Result<DxcValidator, HassleError> {
-        let mut validator: ComPtr<IDxcValidator> = ComPtr::new();
-        check_hr_wrapped!(
-            self.get_dxc_create_instance()?(
-                &CLSID_DxcValidator,
-                &IID_IDxcValidator,
-                validator.as_mut_ptr(),
-            ),
-            DxcValidator::new(validator)
-        )
     }
 }

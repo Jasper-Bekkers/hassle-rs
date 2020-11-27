@@ -1,5 +1,5 @@
 use crate::os::{SysFreeString, BSTR, HRESULT, LPSTR, LPWSTR, WCHAR};
-use crate::wrapper::*;
+use crate::{dxil::Dxil, Dxc, DxcIncludeHandler};
 use thiserror::Error;
 
 #[cfg(windows)]
@@ -86,8 +86,8 @@ pub enum HassleError {
     },
     #[error("LibLoading error: {0:?}")]
     LibLoadingError(#[from] libloading::Error),
-    #[error("Windows only")]
-    WindowsOnly(String),
+    #[error("Utf8 error: {0:?}")]
+    Utf8Error(#[from] std::str::Utf8Error),
 }
 
 /// Helper function to directly compile a HLSL shader to an intermediate language,
